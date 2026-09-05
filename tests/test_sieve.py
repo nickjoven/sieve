@@ -89,7 +89,8 @@ class SieveEndToEnd(unittest.TestCase):
         self.assertIn("# Audit ledger — repo @", md)
         self.assertIn("**OVERSTATING/high** (CONFIRMED)", md)
         self.assertIn("**THEATER/high** (REFUTED)", md)
-        self.assertIn("(in src/ only; tests/ is covered)", md, "corrected claim is what the ledger shows")
+        self.assertIn("**VACUOUS/low** (CONFIRMED) — No tests assert anything (in src/ only; tests/ is covered)", md,
+                      "corrected claim and corrected severity are what the ledger shows")
         self.assertIn("superseded by corrections", md)
         self.assertIn("ls: cannot access '.github/workflows'", md, "evidence is quoted from its blob")
         self.assertIn("```mermaid", md)

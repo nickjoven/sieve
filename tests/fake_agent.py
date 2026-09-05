@@ -20,7 +20,8 @@ if "Finding under test:" in prompt:
     elif "secret" in claim:
         out = {"verdict": "REFUTED", "correction": "", "evidence": "$ git grep -n AKIA\n(no matches)\nThe string in config.example is a placeholder."}
     else:
-        out = {"verdict": "PARTLY", "correction": claim + " (in src/ only; tests/ is covered)", "evidence": "$ grep -rL 'assert' src tests\nsrc/lib.py"}
+        out = {"verdict": "PARTLY", "correction": claim + " (in src/ only; tests/ is covered)", "severity": "low",
+               "evidence": "$ grep -rL 'assert' src tests\nsrc/lib.py"}
     envelope = {"type": "result", "result": "Here is my verdict:\n" + json.dumps(out)}
     print(json.dumps(envelope))
     sys.exit(0)

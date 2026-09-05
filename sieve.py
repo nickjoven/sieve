@@ -47,7 +47,9 @@ READ_ONLY_TOOLS = ",".join([
     "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)",
     "Bash(git rev-parse:*)", "Bash(git ls-files:*)", "Bash(git blame:*)",
     "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(git remote:*)", "Bash(git branch:*)", "Bash(git tag:*)", "Bash(git ls-remote:*)",
     "Bash(grep:*)", "Bash(find:*)", "Bash(sed -n:*)", "Bash(jq:*)",
+    "WebFetch", "WebSearch",  # checking a badge or a published page is reading, not writing
 ])
 DEFAULT_AGENT = f"claude -p --output-format json --allowedTools {READ_ONLY_TOOLS}"
 
@@ -157,6 +159,8 @@ VERIFY_INSTRUCTIONS = """
 Adversarially verify the finding above against the repository. Try to refute it.
 Return ONLY a JSON object: {"verdict": "CONFIRMED|REFUTED|PARTLY",
  "correction": "if PARTLY, the corrected claim; else empty string",
+ "classification": "if PARTLY and the class was wrong, the corrected one; else omit",
+ "severity": "if PARTLY and the severity was wrong, the corrected one; else omit",
  "evidence": "the exact commands you ran and their output, or file:line quotes"}
 Do not modify the repository. Read-only commands only.
 """
@@ -257,7 +261,17 @@ def cmd_run(a: argparse.Namespace) -> int:
         f.evidence_cid = ket.node(evidence_text, "memory", f"verify:{f.dim}", [(root, "derives")])
         claim_cid = f.cid
         if verdict == "PARTLY":
-            corrected = dict(f.body, claim=str(out.get("correction", "")).strip() or f.body["claim"])
+            # The correction may re-class or re-grade as well as re-word; the
+            # corrected finding is normalized like any other, so bad values fall
+            # back rather than leak into the ledger.
+            corrected = normalize_finding(
+                dict(
+                    f.body,
+                    claim=str(out.get("correction", "")).strip() or f.body["claim"],
+                    classification=out.get("classification") or f.body["classification"],
+                    severity=out.get("severity") or f.body["severity"],
+                )
+            )
             f.corrected_cid = ket.node(
                 canonical(corrected), "reasoning", f"verify:{f.dim}", [(f.cid, "supersedes"), (root, "proposes")]
             )
