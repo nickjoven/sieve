@@ -528,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("run", help="audit a repository into the DAG")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="(also accepted here)")
     r.add_argument("repo")
     r.add_argument("--dims", required=True, help="JSON: {context, dimensions:[{key, prompt}]}")
     r.add_argument("--agent", default=DEFAULT_AGENT, help="reviewer command; prompt on stdin, JSON on stdout")
@@ -541,16 +542,20 @@ def main(argv: list[str] | None = None) -> int:
     r.set_defaults(fn=cmd_run)
 
     l = sub.add_parser("ledger", help="render an audit as LEDGER.md (or json / mermaid)")
+    l.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="same as --format json")
     l.add_argument("root")
     l.add_argument("--format", choices=["md", "json", "mermaid"], default="md")
     l.set_defaults(fn=cmd_ledger)
 
     d = sub.add_parser("diff", help="compare two audits")
+    d.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="(also accepted here)")
     d.add_argument("left")
     d.add_argument("right")
     d.set_defaults(fn=cmd_diff)
 
     a = p.parse_args(argv)
+    if a.cmd == "ledger" and a.json:
+        a.format = "json"
     if a.cmd == "run" and a.verifier is None:
         a.verifier = a.agent
     return a.fn(a)
