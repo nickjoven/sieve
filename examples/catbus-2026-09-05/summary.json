@@ -1,0 +1,12 @@
+{
+  "root": "d499407b5f97532e30208acafed2ce66825a6c09a8a48c57eb3633c379ec48c9",
+  "repo": "catbus",
+  "tip": "d6540d5f06e77a067d86527ee6d359c9555915f2",
+  "findings": 17,
+  "verified": 2,
+  "confirmed": 1,
+  "refuted": 0,
+  "partly": 1,
+  "cost_usd": 3.6439,
+  "handoff": "c7e0b6fd8022b09b2beb3d130895603f1daecf0a21c0470465102bc06edf257a"
+}

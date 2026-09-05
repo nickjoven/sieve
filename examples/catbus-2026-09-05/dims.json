@@ -1,0 +1,13 @@
+{
+ "context": "You are auditing a software repository for the honesty of its claims about itself: what the README, docs, CI badges, and commit messages say versus what the code, tests, and history actually show. Classify each finding: HONEST (claim matches evidence), OVERSTATING (claim exceeds evidence), VACUOUS (claim is unfalsifiable or the check cannot fail), THEATER (artifact exists to look like verification without verifying), NEUTRAL-FACT (useful context, no honesty judgment). Severity reflects how much a reader would be misled. Be concrete: cite file:line, quote, or paste command output. Prefer fewer, well-evidenced findings over many vague ones.",
+ "dimensions": [
+  {
+   "key": "readme-vs-code",
+   "prompt": "Take every factual claim in README.md and the top-level docs (features, guarantees, 'supports X', 'tested', 'production-ready', performance numbers) and check each against the code. Report claims that are not backed, are overstated, or are exactly right."
+  },
+  {
+   "key": "ci-and-badges",
+   "prompt": "Inspect CI configuration (.github/workflows, Makefile, scripts) and any badges in the README. Does CI run what it appears to run? Are lint or test steps allowed to fail silently (continue-on-error, || true)? Do badges point at this repository and this branch?"
+  }
+ ]
+}
