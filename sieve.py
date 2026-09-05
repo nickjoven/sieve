@@ -41,7 +41,15 @@ from pathlib import Path
 CLASSIFICATIONS = ["HONEST", "OVERSTATING", "VACUOUS", "THEATER", "NEUTRAL-FACT"]
 SEVERITIES = ["high", "medium", "low", "info"]
 VERDICTS = ["CONFIRMED", "REFUTED", "PARTLY"]
-DEFAULT_AGENT = "claude -p --output-format json"
+# Read-only tools only: an auditor that can edit the repo is not an auditor.
+READ_ONLY_TOOLS = ",".join([
+    "Read", "Glob", "Grep",
+    "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)",
+    "Bash(git rev-parse:*)", "Bash(git ls-files:*)", "Bash(git blame:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(grep:*)", "Bash(find:*)", "Bash(sed -n:*)", "Bash(jq:*)",
+])
+DEFAULT_AGENT = f"claude -p --output-format json --allowedTools {READ_ONLY_TOOLS}"
 
 # ----------------------------------------------------------------------------
 # ket / catbus wrappers — every write is a CLI call, so it lands in .ket/log
@@ -101,13 +109,26 @@ def run_agent(command: str, prompt: str, cwd: str | None = None, timeout: int = 
     Accepts bare JSON, or a Claude Code `--output-format json` envelope whose
     `result` field is text containing JSON.
     """
+    # Claude Code refuses to start inside another Claude Code session; sieve is
+    # often launched from one, and the agent is a separate process by design.
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     p = subprocess.run(
-        shlex.split(command), input=prompt, capture_output=True, text=True, cwd=cwd, timeout=timeout
+        shlex.split(command), input=prompt, capture_output=True, text=True, cwd=cwd, timeout=timeout, env=env
     )
     raw = p.stdout
     if p.returncode != 0:
         raise RuntimeError(f"agent failed ({p.returncode}): {p.stderr.strip()[:500]}")
     return parse_agent_json(raw), raw
+
+
+def envelope_cost(raw: str) -> float:
+    """Dollars spent, if the agent output is a Claude Code envelope; else 0."""
+    try:
+        start, end = raw.find("{"), raw.rfind("}")
+        obj = json.loads(raw[start : end + 1])
+        return float(obj.get("total_cost_usd", 0.0)) if isinstance(obj, dict) else 0.0
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def parse_agent_json(raw: str) -> dict:
@@ -196,6 +217,8 @@ def cmd_run(a: argparse.Namespace) -> int:
     log(f"root {root[:12]}  {target['repo']}@{tip[:12]}  {len(dimensions)} dimensions")
 
     # fan out: one reviewer per dimension, concurrently
+    cost: list[float] = []
+
     def review(d: dict) -> tuple[str, list[Finding]]:
         prompt = f"{context}\nRepository: {repo}\nDimension: {d['key']}\n{d['prompt']}\n{FINDINGS_INSTRUCTIONS}"
         try:
@@ -203,6 +226,7 @@ def cmd_run(a: argparse.Namespace) -> int:
         except Exception as e:  # noqa: BLE001 — a failed reviewer is a finding about the run
             raw = f"reviewer failed: {e}"
             out = {"findings": [], "summary": raw}
+        cost.append(envelope_cost(raw))
         ket.node(raw, "memory", f"audit:{d['key']}", [(root, "derives")])
         found = []
         for f in out.get("findings", []):
@@ -223,7 +247,8 @@ def cmd_run(a: argparse.Namespace) -> int:
     def verify(f: Finding) -> Finding:
         prompt = f"{context}\nRepository: {repo}\nFinding under test:\n{canonical(f.body)}\n{VERIFY_INSTRUCTIONS}"
         try:
-            out, _raw = run_agent(a.verifier, prompt, cwd=repo, timeout=a.timeout)
+            out, raw = run_agent(a.verifier, prompt, cwd=repo, timeout=a.timeout)
+            cost.append(envelope_cost(raw))
         except Exception as e:  # noqa: BLE001
             out = {"verdict": "PARTLY", "correction": f.body["claim"], "evidence": f"verifier failed: {e}"}
         verdict = str(out.get("verdict", "")).upper()
@@ -262,6 +287,7 @@ def cmd_run(a: argparse.Namespace) -> int:
         "findings": len(findings),
         "verified": len(to_verify),
         **{v.lower(): n for v, n in counts.items()},
+        "cost_usd": round(sum(cost), 4),
     }
     if a.handoff:
         text = (
@@ -288,6 +314,8 @@ def cmd_run(a: argparse.Namespace) -> int:
         )
         if "handoff" in summary:
             print(f"handoff: {summary['handoff']}")
+        if summary["cost_usd"]:
+            print(f"cost: ${summary['cost_usd']:.2f}")
         print(f"ledger: sieve ledger {root}")
     return 0
 
