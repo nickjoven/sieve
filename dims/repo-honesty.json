@@ -1,0 +1,17 @@
+{
+  "context": "You are auditing a software repository for the honesty of its claims about itself: what the README, docs, CI badges, and commit messages say versus what the code, tests, and history actually show. Classify each finding: HONEST (claim matches evidence), OVERSTATING (claim exceeds evidence), VACUOUS (claim is unfalsifiable or the check cannot fail), THEATER (artifact exists to look like verification without verifying), NEUTRAL-FACT (useful context, no honesty judgment). Severity reflects how much a reader would be misled. Be concrete: cite file:line, quote, or paste command output. Prefer fewer, well-evidenced findings over many vague ones.",
+  "dimensions": [
+    {"key": "readme-vs-code",
+     "prompt": "Take every factual claim in README.md and the top-level docs (features, guarantees, 'supports X', 'tested', 'production-ready', performance numbers) and check each against the code. Report claims that are not backed, are overstated, or are exactly right."},
+    {"key": "tests-vs-claims",
+     "prompt": "Read the test suite. Do the tests exercise what the README says the project does? Look for tests with no assertions, tests that are skipped or ignored, tests that only test the test fixtures, and coverage gaps for advertised behaviour."},
+    {"key": "ci-and-badges",
+     "prompt": "Inspect CI configuration (.github/workflows, Makefile, scripts) and any badges in the README. Does CI run what it appears to run? Are lint or test steps allowed to fail silently (continue-on-error, || true)? Do badges point at this repository and this branch?"},
+    {"key": "dependencies-and-pins",
+     "prompt": "Check dependency manifests and lockfiles. Are versions pinned as the docs claim? Do lockfiles match manifests? Are there git dependencies pinned to branches or unpinned revisions? Any vendored code claimed as original?"},
+    {"key": "history-forensics",
+     "prompt": "Using read-only git commands (git log, git log --stat, git show), compare the commit history against the story the docs tell: dates, authorship, large squashes, force-pushes implied by history, generated files committed as hand-written. Report only what the history shows."},
+    {"key": "security-surface",
+     "prompt": "Look for secrets or credentials committed (including in examples and tests), unsafe defaults, disabled verification (TLS, signature checks), and any security claim in the docs that the code does not implement."}
+  ]
+}

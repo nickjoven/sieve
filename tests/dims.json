@@ -1,0 +1,8 @@
+{
+  "context": "You are auditing a small repository for the honesty of its own claims about itself.",
+  "dimensions": [
+    {"key": "docs", "prompt": "Compare every claim in README.md against the repository contents."},
+    {"key": "security", "prompt": "Look for secrets, unsafe defaults, and security claims not backed by code."},
+    {"key": "tests", "prompt": "Do the tests test anything? Compare test names against assertions."}
+  ]
+}
