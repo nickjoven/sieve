@@ -224,9 +224,12 @@ class SieveEndToEnd(unittest.TestCase):
 
     @unittest.skipUnless(has_dolt(), "needs dolt")
     def test_projection_is_clean(self):
-        sh("ket", "repair", env=self.env)
+        # setUpClass ran the reviewers concurrently (--jobs 3). The projection
+        # must be clean straight away, with NO `ket repair` first: ket now
+        # serializes Dolt writes, so a fan-out run does not drop rows. This
+        # assertion used to hide the concurrent loss behind a preceding repair.
         p = sh("ket", "verify-projection", env=self.env, check=False)
-        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertEqual(p.returncode, 0, f"projection dirty after a concurrent run:\n{p.stdout}")
 
     @unittest.skipUnless(shutil.which("catbus"), "needs catbus")
     def test_handoff(self):
