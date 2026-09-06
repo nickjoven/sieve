@@ -346,21 +346,26 @@ def cmd_run(a: argparse.Namespace) -> int:
     # fan in: verify material findings, concurrently
     def verify(f: Finding) -> Finding:
         prompt = f"{context}\nRepository: {repo}\nFinding under test:\n{canonical(f.body)}\n{VERIFY_INSTRUCTIONS}"
+        raw = ""
         try:
             out, raw = run_agent(a.verifier, prompt, cwd=repo, timeout=a.timeout)
-            cost.append(envelope_cost(raw))
             verdict = str(out.get("verdict", "")).upper()
             if verdict not in VERDICTS:
                 raise AgentError(f"unrecognized verdict {verdict!r}", raw)
         except AgentError as e:
-            cost.append(envelope_cost(e.raw))
+            # Count the cost once, here — the unrecognized-verdict path reaches
+            # this after run_agent already succeeded, so the success block must
+            # not also count it. e.raw is the same envelope as raw in that case.
+            raw = getattr(e, "raw", "") or raw
+            cost.append(envelope_cost(raw))
             # No verdict edge at all. The failure is recorded as evidence that
             # derives from the finding, so the ledger shows it as an error —
             # never as confirmed, never as a correction.
-            text = f"verifier failed: {e}" + (f"\n\n--- raw output ---\n{e.raw}" if e.raw else "")
+            text = f"verifier failed: {e}" + (f"\n\n--- raw output ---\n{raw}" if raw else "")
             f.verdict = ERROR
             f.evidence_cid = ket.node(text, "memory", f"verify:{f.dim}", [(root, "derives"), (f.cid, "derives")])
             return f
+        cost.append(envelope_cost(raw))  # recognized verdict: count once, here only
         evidence_text = str(out.get("evidence", "")).strip() or "(no evidence returned)"
         f.evidence_cid = ket.node(evidence_text, "memory", f"verify:{f.dim}", [(root, "derives")])
         claim_cid = f.cid

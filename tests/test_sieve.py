@@ -183,6 +183,28 @@ class SieveEndToEnd(unittest.TestCase):
         self.assertIn("reviewer failed:", blob)
         self.assertIn('"findings": ["x", 3]', blob, "the raw output is kept with the failure")
 
+    def test_cost_counted_once_on_unrecognized_verdict(self):
+        # D4: a verifier that returns a well-formed envelope (carrying a cost)
+        # but a verdict sieve does not recognize must contribute its cost once,
+        # not twice. Reviewers here emit no envelope, so every dollar in the
+        # summary is a verifier's, one per material finding.
+        env = self.fresh_store("costonce")
+        vfy = self.tmp / "cost_verifier.py"
+        vfy.write_text(
+            "import sys, json\n"
+            "sys.stdin.read()\n"
+            "print(json.dumps({'type': 'result', 'total_cost_usd': 0.01,\n"
+            "    'result': 'my verdict: ' + json.dumps({'verdict': 'MAYBE', 'evidence': 'e'})}))\n"
+        )
+        p = sh(*SIEVE, "--json", "run", str(self.repo), "--dims", str(HERE / "dims.json"),
+               "--agent", FAKE, "--verifier", f"{sys.executable} {vfy}", env=env)
+        s = json.loads(p.stdout)
+        # every material finding hit the unrecognized-verdict path
+        self.assertEqual((s["confirmed"], s["refuted"], s["partly"], s["error"]),
+                         (0, 0, 0, s["verified"]))
+        self.assertEqual(s["cost_usd"], round(0.01 * s["verified"], 4),
+                         "each verifier call's envelope cost is counted exactly once")
+
     def test_timeout_kills_the_agent_and_the_run_continues(self):
         env = self.fresh_store("timeout")
         p = sh(*SIEVE, "--json", "run", str(self.repo), "--dims", str(HERE / "dims.json"),
