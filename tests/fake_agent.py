@@ -18,7 +18,7 @@ if "Finding under test:" in prompt:
     if "no CI" in claim:
         out = {"verdict": "CONFIRMED", "correction": "", "evidence": "$ ls .github/workflows\nls: cannot access '.github/workflows': No such file or directory"}
     elif "secret" in claim:
-        out = {"verdict": "REFUTED", "correction": "", "evidence": "$ git grep -n AKIA\n(no matches)\nThe string in config.example is a placeholder."}
+        out = {"verdict": "REFUTED", "correction": "", "evidence": "- ran: git grep -n AKIA\n(no matches)\nThe string in config.example is a placeholder."}
     else:
         out = {"verdict": "PARTLY", "correction": claim + " (in src/ only; tests/ is covered)", "severity": "low",
                "evidence": "$ grep -rL 'assert' src tests\nsrc/lib.py"}

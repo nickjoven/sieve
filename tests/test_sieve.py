@@ -50,8 +50,30 @@ class SieveEndToEnd(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def graph(self):
-        return json.loads(sh("ket", "--json", "graph", "--format", "json", env=self.env).stdout)
+    def graph(self, env=None):
+        return json.loads(sh("ket", "--json", "graph", "--format", "json", env=env or self.env).stdout)
+
+    def audit_edges(self, root, env=None):
+        """Edges of one audit: descendants of root, stopping at other context nodes
+        (a chained audit's root, a handoff packet). Other tests write more audits
+        into the same store, so whole-store counts would depend on test order."""
+        g = self.graph(env)
+        kind = {n["cid"]: n["kind"] for n in g["nodes"]}
+        children = {}
+        for e in g["edges"]:
+            children.setdefault(e["parent"], []).append(e["child"])
+        keep, stack = {root}, [root]
+        while stack:
+            for c in children.get(stack.pop(), []):
+                if c not in keep and kind[c] != "context":
+                    keep.add(c)
+                    stack.append(c)
+        return [e for e in g["edges"] if e["child"] in keep and e["parent"] in keep]
+
+    def fresh_store(self, name):
+        env = dict(os.environ, KET_HOME=str(self.tmp / f"{name}.ket"))
+        sh("ket", "init", env=env)
+        return env
 
     def test_summary_counts(self):
         s = self.summary
@@ -59,12 +81,11 @@ class SieveEndToEnd(unittest.TestCase):
         # docs and security — two nodes, one content blob (dedup is the point).
         self.assertEqual(s["findings"], 5)
         self.assertEqual(s["verified"], 4)  # 4 material (high/medium)
-        self.assertEqual((s["confirmed"], s["refuted"], s["partly"]), (2, 1, 1))
+        self.assertEqual((s["confirmed"], s["refuted"], s["partly"], s["error"]), (2, 1, 1, 0))
 
     def test_dag_shape_by_edge_kind(self):
-        g = self.graph()
         kinds = {}
-        for e in g["edges"]:
+        for e in self.audit_edges(self.root):
             kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
         # 5 findings + 1 corrected finding propose against root
         self.assertEqual(kinds["proposes"], 6)
@@ -89,9 +110,10 @@ class SieveEndToEnd(unittest.TestCase):
         self.assertIn("# Audit ledger — repo @", md)
         self.assertIn("**OVERSTATING/high** (CONFIRMED)", md)
         self.assertIn("**THEATER/high** (REFUTED)", md)
-        self.assertIn("**VACUOUS/low** (CONFIRMED) — No tests assert anything (in src/ only; tests/ is covered)", md,
+        self.assertIn("**VACUOUS/low** (CORRECTED) — No tests assert anything (in src/ only; tests/ is covered)", md,
                       "corrected claim and corrected severity are what the ledger shows")
-        self.assertIn("superseded by corrections", md)
+        self.assertIn("**5 findings** · 2 confirmed · 1 corrected · 1 refuted · 1 unverified · 1 superseded by corrections", md,
+                      "the header counts agree with the run summary: a correction is not a plain confirmation")
         self.assertIn("ls: cannot access '.github/workflows'", md, "evidence is quoted from its blob")
         self.assertIn("```mermaid", md)
         self.assertIn("--x|refutes|", md)
@@ -120,6 +142,59 @@ class SieveEndToEnd(unittest.TestCase):
         # diff is by content: the claim docs and security both made counts once
         self.assertEqual(len(d["removed"]), 3, "docs + security findings gone; tests finding stays")
         self.assertEqual(d["unchanged"], 1)
+        # The first audit's ledger is unchanged by the chained one: the walk
+        # from root1 stops at root2 instead of absorbing its findings.
+        j = json.loads(sh(*SIEVE, "ledger", self.root, "--format", "json", env=self.env).stdout)
+        self.assertEqual(len([f for f in j["findings"] if not f["superseded"]]), 5)
+        mmd = sh(*SIEVE, "ledger", self.root, "--format", "mermaid", env=self.env).stdout
+        self.assertNotIn(root2[:12], mmd)
+        # And the reverse diff does report the second audit's extra finding as removed only once each way.
+        d2 = json.loads(sh(*SIEVE, "--json", "diff", root2, self.root, env=self.env).stdout)
+        self.assertEqual(len(d2["added"]), 3)
+
+    def test_verifier_failure_is_an_error_not_a_verdict(self):
+        env = self.fresh_store("verr")
+        p = sh(*SIEVE, "--json", "run", str(self.repo), "--dims", str(HERE / "dims.json"), "--agent", FAKE,
+               "--verifier", f"{sys.executable} -c 'import sys; sys.exit(1)'", env=env)
+        s = json.loads(p.stdout)
+        self.assertEqual((s["confirmed"], s["refuted"], s["partly"], s["error"]), (0, 0, 0, 4))
+        kinds = {e["kind"] for e in self.audit_edges(s["root"], env)}
+        self.assertFalse(kinds & {"confirms", "refutes", "supersedes"}, "no verdict edges from a failed verifier")
+        md = sh(*SIEVE, "ledger", s["root"], env=env).stdout
+        self.assertIn("· 0 confirmed · 0 refuted · 1 unverified · 4 verifier errors", md)
+        self.assertEqual(md.count("(VERIFIER ERROR)"), 4)
+        self.assertIn("verifier failed: agent failed (1)", md)
+
+    def test_bad_reviewer_output_is_recorded_not_fatal(self):
+        env = self.fresh_store("badrev")
+        bad = self.tmp / "bad_agent.py"
+        bad.write_text('import sys\nprint(\'{"findings": ["x", 3], "summary": "s"}\')\n')
+        p = sh(*SIEVE, "--json", "run", str(self.repo), "--dims", str(HERE / "dims.json"),
+               "--agent", f"{sys.executable} {bad}", env=env)
+        self.assertEqual(json.loads(p.stdout)["findings"], 0)
+        g = self.graph(env)
+        transcripts = [n for n in g["nodes"] if n["agent"].startswith("audit:")]
+        self.assertEqual(len(transcripts), 3, "one transcript per dimension even when the reviewer misbehaves")
+        blob = sh("ket", "get", json.loads(sh("ket", "--json", "dag", "show", transcripts[0]["cid"], env=env).stdout)["output_cid"], env=env).stdout
+        self.assertIn("reviewer failed:", blob)
+        self.assertIn('"findings": ["x", 3]', blob, "the raw output is kept with the failure")
+
+    def test_timeout_kills_the_agent_and_the_run_continues(self):
+        env = self.fresh_store("timeout")
+        p = sh(*SIEVE, "--json", "run", str(self.repo), "--dims", str(HERE / "dims.json"),
+               "--agent", f"{sys.executable} -c 'import time; time.sleep(30)'", "--timeout", "1", env=env)
+        self.assertEqual(json.loads(p.stdout)["findings"], 0)
+
+    def test_run_refuses_a_non_repo_and_a_bad_parent(self):
+        env = self.fresh_store("refuse")
+        p = sh(*SIEVE, "run", str(self.tmp), "--dims", str(HERE / "dims.json"), "--agent", FAKE, env=env, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("git rev-parse failed", p.stderr)
+        for parent in ("deadbeef", "0" * 64):
+            p = sh(*SIEVE, "run", str(self.repo), "--dims", str(HERE / "dims.json"), "--agent", FAKE,
+                   "--parent", parent, env=env, check=False)
+            self.assertNotEqual(p.returncode, 0, parent)
+            self.assertIn("--parent", p.stderr)
 
     @unittest.skipUnless(has_dolt(), "needs dolt")
     def test_projection_is_clean(self):
@@ -129,11 +204,12 @@ class SieveEndToEnd(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("catbus"), "needs catbus")
     def test_handoff(self):
+        env = self.fresh_store("handoff")
         p = sh(*SIEVE, "--json", "run", str(self.repo), "--dims", str(HERE / "dims.json"),
-               "--agent", FAKE, "--verify", "none", "--handoff", env=self.env)
+               "--agent", FAKE, "--verify", "none", "--handoff", env=env)
         s = json.loads(p.stdout)
         self.assertIn("handoff", s)
-        block = sh("catbus", "handoff", s["handoff"], env=self.env).stdout
+        block = sh("catbus", "handoff", s["handoff"], env=env).stdout
         self.assertIn("sieve audit of repo@", block)
         self.assertIn(f"- {s['root']}", block, "handoff lists the audit root as its parent")
 

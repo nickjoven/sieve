@@ -2,7 +2,7 @@
 
 Root `d499407b5f97532e30208acafed2ce66825a6c09a8a48c57eb3633c379ec48c9` · started 2026-09-05T05:50:00Z · dimensions: readme-vs-code, ci-and-badges
 
-**17 findings** · 2 confirmed · 0 refuted · 15 unverified · 1 superseded by corrections
+**17 findings** · 1 confirmed · 1 corrected · 0 refuted · 15 unverified · 1 superseded by corrections
 
 Every row below is a content-addressed node in the audit DAG. A verdict is a
 typed edge from a verification node that is itself grounded in captured
@@ -19,7 +19,7 @@ that supersede the originals, and the originals stay addressable.
 
    - node `503cb7bd484bc7da096697d8a5f2d3a6fe4c7b091d55fab537e3046078e671af`
 
-2. **VACUOUS/medium** (CONFIRMED) — README.md:64 "Use `catbus validate` to ensure packets meet requirements" — OVERSTATING (not VACUOUS), severity low-medium. validate_packet (src/main.rs:919-953) only checks node meta catbus_packet==true, non-blank summary, optional --require-artifacts/--require-cdom, and cdom.format=='catbus.cdom.v1'; it never verifies that artifact CIDs, the CDOM CID, or parent CIDs resolve in the CAS. For packets produced by `catbus pack` (which sets the meta unconditionally at src/main.rs:301 and :330 and always writes format 'catbus.cdom.v1' at :306), the flagless form used by scripts/catbus-guard.sh:31 reduces to 'CID resolves to a parseable packet node and summary is not blank'. However the check is not unfalsifiable: cmd_validate (src/main.rs:652-660) fails on a nonexistent CID, a CID that is not a DAG node, or a node whose output is not HandoffPacket JSON (get_node / load_packet errors); clap's required `--summary` accepts an empty string so `pack --summary ""` produces a packet that flagless validate rejects; and the README's own example at line 69 uses `--require-artifacts`, a check that genuinely fails on artifact-less packets. The unit test validation_report_errors (src/main.rs:1120-1137) only covers the with-flags path; there is no tests/ directory or integration test for the flagless path.
+2. **VACUOUS/medium** (CORRECTED) — README.md:64 "Use `catbus validate` to ensure packets meet requirements" — OVERSTATING (not VACUOUS), severity low-medium. validate_packet (src/main.rs:919-953) only checks node meta catbus_packet==true, non-blank summary, optional --require-artifacts/--require-cdom, and cdom.format=='catbus.cdom.v1'; it never verifies that artifact CIDs, the CDOM CID, or parent CIDs resolve in the CAS. For packets produced by `catbus pack` (which sets the meta unconditionally at src/main.rs:301 and :330 and always writes format 'catbus.cdom.v1' at :306), the flagless form used by scripts/catbus-guard.sh:31 reduces to 'CID resolves to a parseable packet node and summary is not blank'. However the check is not unfalsifiable: cmd_validate (src/main.rs:652-660) fails on a nonexistent CID, a CID that is not a DAG node, or a node whose output is not HandoffPacket JSON (get_node / load_packet errors); clap's required `--summary` accepts an empty string so `pack --summary ""` produces a packet that flagless validate rejects; and the README's own example at line 69 uses `--require-artifacts`, a check that genuinely fails on artifact-less packets. The unit test validation_report_errors (src/main.rs:1120-1137) only covers the with-flags path; there is no tests/ directory or integration test for the flagless path.
    - evidence: validate_packet (src/main.rs:919-953) checks four things: node meta catbus_packet==true, summary non-blank, optional --require-artifacts / --require-cdom, and cdom.format string. Any packet made by `catbus pack` sets the meta unconditionally (src/main.rs:301, 330) and clap makes --summary a required String (src/main.rs:71-73), so a default `catbus validate <cid>` (the form catbus-guard.sh:31 uses) can only fail on an all-whitespace summary. It does not check that artifact CIDs, the CDOM CID, or parent CIDs exist in the CAS. The unit test validation_report_errors (src/main.rs:1120-1137) exercises only the with-flags path.
    - supersedes `05e1c222aea6`
    - verification evidence `89d3b5bbfd9a`:
@@ -94,7 +94,7 @@ that supersede the originals, and the originals stay addressable.
 
 ```mermaid
 graph BT
-  nd499407b5f97["d499407b5f97<br/>context · sieve<br/>{#quot;dimensions#quot;:[#quot;readme-vs-code#quot;,#quot;ci-and-badges#quot;]…"]
+  nd499407b5f97["d499407b5f97<br/>context · sieve<br/>{#quot;dimensions#quot;:#91;#quot;readme-vs-code#quot;,#quot;ci-and-badges#quot;#93;…"]
   class nd499407b5f97 context
   n035a109c3b40["035a109c3b40<br/>memory · audit:ci-and-badges<br/>{#quot;duration_api_ms#quot;:126634,#quot;stop_reason#quot;:#quot;end_tur…"]
   class n035a109c3b40 memory
@@ -104,7 +104,7 @@ graph BT
   class nc7c59b2b71f9 reasoning
   n46b43851b6e8["46b43851b6e8<br/>reasoning · audit:ci-and-badges<br/>{#quot;claim#quot;:#quot;README.md:92-96: \#quot;The example workflo…"]
   class n46b43851b6e8 reasoning
-  n6cebf6196503["6cebf6196503<br/>reasoning · audit:ci-and-badges<br/>{#quot;claim#quot;:#quot;README.md:98-105: \#quot;`Cargo.toml` uses …"]
+  n6cebf6196503["6cebf6196503<br/>reasoning · audit:ci-and-badges<br/>{#quot;claim#quot;:#quot;README.md:98-105: \#quot;#96;Cargo.toml#96; uses …"]
   class n6cebf6196503 reasoning
   n2d788b4343c2["2d788b4343c2<br/>reasoning · audit:ci-and-badges<br/>{#quot;claim#quot;:#quot;README.md:63-66: \#quot;For strict enforcem…"]
   class n2d788b4343c2 reasoning
@@ -114,7 +114,7 @@ graph BT
   class ne8c96f9a6671 memory
   n503cb7bd484b["503cb7bd484b<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;README.md:63-66 \#quot;Enforce Handoffs ...…"]
   class n503cb7bd484b reasoning
-  n05e1c222aea6["05e1c222aea6<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;README.md:64 \#quot;Use `catbus validate` t…"]
+  n05e1c222aea6["05e1c222aea6<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;README.md:64 \#quot;Use #96;catbus validate#96; t…"]
   class n05e1c222aea6 reasoning
   ndf1daf597a03["df1daf597a03<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;README.md:13 \#quot;Immutable handoff packe…"]
   class ndf1daf597a03 reasoning
@@ -124,7 +124,7 @@ graph BT
   class n33b50b35b6e7 reasoning
   ned6339b96a5b["ed6339b96a5b<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;README.md:48-61 \#quot;How Much It Saves\#quot;:…"]
   class ned6339b96a5b reasoning
-  n86436e68f943["86436e68f943<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;README.md:98-105 \#quot;`Cargo.toml` uses t…"]
+  n86436e68f943["86436e68f943<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;README.md:98-105 \#quot;#96;Cargo.toml#96; uses t…"]
   class n86436e68f943 reasoning
   nb2e1c5b63a27["b2e1c5b63a27<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;README.md:92-96 \#quot;The example workflow…"]
   class nb2e1c5b63a27 reasoning
@@ -132,20 +132,18 @@ graph BT
   class na6be71271500 reasoning
   n2b0b4afd5591["2b0b4afd5591<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;Testing / CI posture (README makes no …"]
   class n2b0b4afd5591 reasoning
-  n58b7c3ed4f05["58b7c3ed4f05<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;Command surface vs README: `gc` and `l…"]
+  n58b7c3ed4f05["58b7c3ed4f05<br/>reasoning · audit:readme-vs-code<br/>{#quot;claim#quot;:#quot;Command surface vs README: #96;gc#96; and #96;l…"]
   class n58b7c3ed4f05 reasoning
-  n2f292b4d78aa["2f292b4d78aa<br/>memory · verify:readme-vs-code<br/>scripts/catbus-guard.sh:31-35: `catbus validate …"]
+  n2f292b4d78aa["2f292b4d78aa<br/>memory · verify:readme-vs-code<br/>scripts/catbus-guard.sh:31-35: #96;catbus validate …"]
   class n2f292b4d78aa memory
   n572538348e7b["572538348e7b<br/>reasoning · verify:readme-vs-code<br/>{#quot;correction#quot;:#quot;#quot;,#quot;verdict#quot;:#quot;CONFIRMED#quot;}"]
   class n572538348e7b reasoning
-  n89d3b5bbfd9a["89d3b5bbfd9a<br/>memory · verify:readme-vs-code<br/>README.md:64-69: #quot;Use `catbus validate` to ensur…"]
+  n89d3b5bbfd9a["89d3b5bbfd9a<br/>memory · verify:readme-vs-code<br/>README.md:64-69: #quot;Use #96;catbus validate#96; to ensur…"]
   class n89d3b5bbfd9a memory
-  n1dd575fdee89["1dd575fdee89<br/>reasoning · verify:readme-vs-code<br/>{#quot;claim#quot;:#quot;README.md:64 \#quot;Use `catbus validate` t…"]
+  n1dd575fdee89["1dd575fdee89<br/>reasoning · verify:readme-vs-code<br/>{#quot;claim#quot;:#quot;README.md:64 \#quot;Use #96;catbus validate#96; t…"]
   class n1dd575fdee89 reasoning
-  n5a48866ed54a["5a48866ed54a<br/>reasoning · verify:readme-vs-code<br/>{#quot;correction#quot;:#quot;README.md:64 \#quot;Use `catbus valida…"]
+  n5a48866ed54a["5a48866ed54a<br/>reasoning · verify:readme-vs-code<br/>{#quot;correction#quot;:#quot;README.md:64 \#quot;Use #96;catbus valida…"]
   class n5a48866ed54a reasoning
-  nc7e0b6fd8022["c7e0b6fd8022<br/>context · sieve<br/>audit catbus"]
-  class nc7e0b6fd8022 context
   n035a109c3b40 --> nd499407b5f97
   n650dde6b4ca1 -.->|proposes| nd499407b5f97
   nc7c59b2b71f9 -.->|proposes| nd499407b5f97
@@ -173,7 +171,6 @@ graph BT
   n1dd575fdee89 -.->|proposes| nd499407b5f97
   n5a48866ed54a -->|confirms| n1dd575fdee89
   n5a48866ed54a ==>|grounds| n89d3b5bbfd9a
-  nc7e0b6fd8022 --> nd499407b5f97
   classDef memory fill:#E8F5E9,stroke:#555,color:#111
   classDef reasoning fill:#FFF3E0,stroke:#555,color:#111
   classDef context fill:#F1F8E9,stroke:#555,color:#111

@@ -31,7 +31,9 @@ import argparse
 import concurrent.futures as cf
 import json
 import os
+import re
 import shlex
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -41,17 +43,42 @@ from pathlib import Path
 CLASSIFICATIONS = ["HONEST", "OVERSTATING", "VACUOUS", "THEATER", "NEUTRAL-FACT"]
 SEVERITIES = ["high", "medium", "low", "info"]
 VERDICTS = ["CONFIRMED", "REFUTED", "PARTLY"]
+# A verification that never produced a verdict (agent crashed, timed out,
+# answered with something unparseable). Recorded as evidence, never as a
+# verdict edge: an outage must not read as "confirmed".
+ERROR = "ERROR"
+
 # Read-only tools only: an auditor that can edit the repo is not an auditor.
+# `--allowedTools` pre-approves; anything else prompts, and in `-p` mode a
+# prompt is a denial. So the list is what the agent can do, and it is kept to
+# the file tools (which honour deny rules) plus git subcommands in their
+# read-only spellings. No shell file readers: `Read`/`Grep`/`Glob` already
+# cover the repo, and `cat ~/.aws/credentials` under prompt injection is not
+# a risk worth a convenience. No web tools: a fetch is an exfiltration channel.
 READ_ONLY_TOOLS = ",".join([
     "Read", "Glob", "Grep",
-    "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)",
-    "Bash(git rev-parse:*)", "Bash(git ls-files:*)", "Bash(git blame:*)",
-    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
-    "Bash(git remote:*)", "Bash(git branch:*)", "Bash(git tag:*)", "Bash(git ls-remote:*)",
-    "Bash(grep:*)", "Bash(find:*)", "Bash(sed -n:*)", "Bash(jq:*)",
-    "WebFetch", "WebSearch",  # checking a badge or a published page is reading, not writing
+    "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status)",
+    "Bash(git status --short)", "Bash(git rev-parse:*)", "Bash(git ls-files:*)",
+    "Bash(git blame:*)", "Bash(git grep:*)", "Bash(git shortlog:*)", "Bash(git describe:*)",
+    "Bash(git branch)", "Bash(git branch -a)", "Bash(git branch -r)", "Bash(git branch -v)",
+    "Bash(git branch --list:*)", "Bash(git tag)", "Bash(git tag -l:*)", "Bash(git tag -n:*)",
+    "Bash(git remote -v)", "Bash(git ls-remote:*)",
+    "Bash(ls:*)", "Bash(wc:*)",
 ])
-DEFAULT_AGENT = f"claude -p --output-format json --allowedTools {READ_ONLY_TOOLS}"
+DENIED_TOOLS = ",".join([
+    "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
+    "Bash(curl:*)", "Bash(wget:*)", "Bash(git push:*)", "Bash(git commit:*)",
+])
+# The audited repository is data, not configuration. Its .claude/settings.json
+# (hooks, permission grants) and .mcp.json must not load: `--setting-sources
+# user` keeps only the auditor's own settings and `--strict-mcp-config` drops
+# every MCP server the repo could declare. CLAUDE.md still auto-loads; pass
+# `--bare` via --agent to skip that too (it also restricts auth to an API key).
+DEFAULT_AGENT = (
+    "claude -p --output-format json --setting-sources user --strict-mcp-config "
+    f"--allowedTools {READ_ONLY_TOOLS} --disallowedTools {DENIED_TOOLS}"
+)
+CID_RE = re.compile(r"[0-9a-f]{64}")
 
 # ----------------------------------------------------------------------------
 # ket / catbus wrappers — every write is a CLI call, so it lands in .ket/log
@@ -87,10 +114,19 @@ class Ket:
         return self.text("get", cid)
 
     def node(self, content: str, kind: str, agent: str, parents: list[tuple[str, str]]) -> str:
-        args = ["dag", "create", content, "--kind", kind, "--agent", agent]
+        # Content goes over stdin: agent output can start with a dash or run
+        # past what a single argv entry may hold.
+        args = ["dag", "create", "--content-file", "-", "--kind", kind, "--agent", agent]
         for cid, edge in parents:
             args += ["--parent", f"{cid}:{edge}"]
-        return self.json(*args)["node_cid"]
+        return self.json(*args, stdin=content)["node_cid"]
+
+    def node_exists(self, cid: str) -> bool:
+        try:
+            self.json("dag", "show", cid)
+            return True
+        except RuntimeError:
+            return False
 
     def graph(self) -> dict:
         return self.json("graph", "--format", "json")
@@ -105,22 +141,45 @@ def canonical(obj) -> str:
 # agents
 
 
+class AgentError(RuntimeError):
+    """An agent call that produced no usable answer. Carries whatever it did
+    print, so the transcript (and its cost) is kept even when parsing failed."""
+
+    def __init__(self, msg: str, raw: str = ""):
+        super().__init__(msg)
+        self.raw = raw
+
+
 def run_agent(command: str, prompt: str, cwd: str | None = None, timeout: int = 1800) -> tuple[dict, str]:
     """Run an agent command with the prompt on stdin. Returns (parsed JSON, raw stdout).
 
     Accepts bare JSON, or a Claude Code `--output-format json` envelope whose
-    `result` field is text containing JSON.
+    `result` field is text containing JSON. Raises AgentError otherwise.
     """
     # Claude Code refuses to start inside another Claude Code session; sieve is
     # often launched from one, and the agent is a separate process by design.
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    p = subprocess.run(
-        shlex.split(command), input=prompt, capture_output=True, text=True, cwd=cwd, timeout=timeout, env=env
+    # Own process group, so a timeout kills the agent's children (its shell
+    # tool calls) too, not just the agent.
+    p = subprocess.Popen(
+        shlex.split(command), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=cwd, env=env, start_new_session=True,
     )
-    raw = p.stdout
+    try:
+        raw, err = p.communicate(prompt, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        raw, _ = p.communicate()
+        raise AgentError(f"agent timed out after {timeout}s", raw or "")
     if p.returncode != 0:
-        raise RuntimeError(f"agent failed ({p.returncode}): {p.stderr.strip()[:500]}")
-    return parse_agent_json(raw), raw
+        raise AgentError(f"agent failed ({p.returncode}): {err.strip()[:500]}", raw)
+    try:
+        return parse_agent_json(raw), raw
+    except ValueError as e:
+        raise AgentError(f"agent output is not the expected JSON: {e}", raw)
 
 
 def envelope_cost(raw: str) -> float:
@@ -138,10 +197,13 @@ def parse_agent_json(raw: str) -> dict:
         start, end = text.find("{"), text.rfind("}")
         if start < 0 or end < 0:
             raise ValueError("no JSON object in agent output")
-        return json.loads(text[start : end + 1])
+        obj = json.loads(text[start : end + 1])
+        if not isinstance(obj, dict):
+            raise ValueError("agent output is not a JSON object")
+        return obj
 
     obj = extract(raw)
-    if isinstance(obj, dict) and isinstance(obj.get("result"), str) and "findings" not in obj and "verdict" not in obj:
+    if isinstance(obj.get("result"), str) and "findings" not in obj and "verdict" not in obj:
         obj = extract(obj["result"])
     return obj
 
@@ -166,15 +228,30 @@ Do not modify the repository. Read-only commands only.
 """
 
 
+def one_line(s: str) -> str:
+    return " ".join(str(s).split())
+
+
 def normalize_finding(f: dict) -> dict:
     cls = str(f.get("classification", "NEUTRAL-FACT")).upper()
     sev = str(f.get("severity", "info")).lower()
     return {
-        "claim": str(f.get("claim", "")).strip(),
+        "claim": one_line(f.get("claim", "")),  # a claim is one sentence; it renders on one line
         "evidence": str(f.get("evidence", "")).strip(),
         "classification": cls if cls in CLASSIFICATIONS else "NEUTRAL-FACT",
         "severity": sev if sev in SEVERITIES else "info",
     }
+
+
+def findings_of(out: dict) -> list[dict]:
+    """The reviewer's findings list, or a ValueError if it is not one."""
+    found = out.get("findings", [])
+    if not isinstance(found, list):
+        raise ValueError(f"findings is {type(found).__name__}, not a list")
+    bad = [f for f in found if not isinstance(f, dict)]
+    if bad:
+        raise ValueError(f"{len(bad)} finding(s) are not objects: {bad[:3]!r}")
+    return found
 
 
 # ----------------------------------------------------------------------------
@@ -192,8 +269,13 @@ class Finding:
     corrected_cid: str | None = None
 
 
-def git(repo: str, *args: str) -> str:
-    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True).stdout.strip()
+def git(repo: str, *args: str, optional: bool = False) -> str:
+    p = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    if p.returncode != 0:
+        if optional:
+            return ""
+        raise SystemExit(f"git {args[0]} failed in {repo}: {p.stderr.strip() or 'not a git repository?'}")
+    return p.stdout.strip()
 
 
 def cmd_run(a: argparse.Namespace) -> int:
@@ -204,9 +286,14 @@ def cmd_run(a: argparse.Namespace) -> int:
     dimensions = dims["dimensions"]
     material = set(a.material.split(","))
 
+    if a.parent is not None:
+        if not CID_RE.fullmatch(a.parent):
+            raise SystemExit(f"--parent must be a 64-hex node CID, got {a.parent!r}")
+        if not ket.node_exists(a.parent):
+            raise SystemExit(f"--parent {a.parent[:12]}… is not a node in this store")
     tip = git(repo, "rev-parse", "HEAD")
     tree = git(repo, "rev-parse", "HEAD^{tree}")
-    url = git(repo, "remote", "get-url", "origin") or None
+    url = git(repo, "remote", "get-url", "origin", optional=True) or None
     target = {
         "kind": "sieve.audit.v1",
         "repo": os.path.basename(repo),
@@ -225,15 +312,19 @@ def cmd_run(a: argparse.Namespace) -> int:
 
     def review(d: dict) -> tuple[str, list[Finding]]:
         prompt = f"{context}\nRepository: {repo}\nDimension: {d['key']}\n{d['prompt']}\n{FINDINGS_INSTRUCTIONS}"
+        found_raw: list[dict] = []
+        raw = ""
         try:
             out, raw = run_agent(a.agent, prompt, cwd=repo, timeout=a.timeout)
-        except Exception as e:  # noqa: BLE001 — a failed reviewer is a finding about the run
-            raw = f"reviewer failed: {e}"
-            out = {"findings": [], "summary": raw}
+            found_raw = findings_of(out)
+        except (AgentError, ValueError) as e:  # a failed reviewer is a finding about the run
+            raw = getattr(e, "raw", "") or raw
+            raw = f"reviewer failed: {e}" + (f"\n\n--- raw output ---\n{raw}" if raw else "")
+            log(f"  audit:{d['key']:<20} reviewer failed: {e}")
         cost.append(envelope_cost(raw))
         ket.node(raw, "memory", f"audit:{d['key']}", [(root, "derives")])
         found = []
-        for f in out.get("findings", []):
+        for f in found_raw:
             body = normalize_finding(f)
             if not body["claim"]:
                 continue
@@ -253,10 +344,18 @@ def cmd_run(a: argparse.Namespace) -> int:
         try:
             out, raw = run_agent(a.verifier, prompt, cwd=repo, timeout=a.timeout)
             cost.append(envelope_cost(raw))
-        except Exception as e:  # noqa: BLE001
-            out = {"verdict": "PARTLY", "correction": f.body["claim"], "evidence": f"verifier failed: {e}"}
-        verdict = str(out.get("verdict", "")).upper()
-        verdict = verdict if verdict in VERDICTS else "PARTLY"
+            verdict = str(out.get("verdict", "")).upper()
+            if verdict not in VERDICTS:
+                raise AgentError(f"unrecognized verdict {verdict!r}", raw)
+        except AgentError as e:
+            cost.append(envelope_cost(e.raw))
+            # No verdict edge at all. The failure is recorded as evidence that
+            # derives from the finding, so the ledger shows it as an error —
+            # never as confirmed, never as a correction.
+            text = f"verifier failed: {e}" + (f"\n\n--- raw output ---\n{e.raw}" if e.raw else "")
+            f.verdict = ERROR
+            f.evidence_cid = ket.node(text, "memory", f"verify:{f.dim}", [(root, "derives"), (f.cid, "derives")])
+            return f
         evidence_text = str(out.get("evidence", "")).strip() or "(no evidence returned)"
         f.evidence_cid = ket.node(evidence_text, "memory", f"verify:{f.dim}", [(root, "derives")])
         claim_cid = f.cid
@@ -293,7 +392,7 @@ def cmd_run(a: argparse.Namespace) -> int:
             for f in ex.map(verify, to_verify):
                 log(f"  verify:{f.dim:<19} {f.verdict:<9} {f.body['claim'][:60]}")
 
-    counts = {v: sum(1 for f in findings if f.verdict == v) for v in VERDICTS}
+    counts = {v: sum(1 for f in findings if f.verdict == v) for v in VERDICTS + [ERROR]}
     summary = {
         "root": root,
         "repo": target["repo"],
@@ -306,8 +405,9 @@ def cmd_run(a: argparse.Namespace) -> int:
     if a.handoff:
         text = (
             f"sieve audit of {target['repo']}@{tip[:12]}: {len(findings)} findings, "
-            f"{counts['CONFIRMED']} confirmed, {counts['REFUTED']} refuted, {counts['PARTLY']} partly. "
-            f"Ledger: sieve ledger {root}"
+            f"{counts['CONFIRMED']} confirmed, {counts['REFUTED']} refuted, {counts['PARTLY']} partly"
+            + (f", {counts[ERROR]} verifier errors" if counts[ERROR] else "")
+            + f". Ledger: sieve ledger {root}"
         )
         cmd = ["catbus"] + (["--ket-home", a.ket_home] if a.ket_home else []) + [
             "--json", "pack", "--title", f"audit {target['repo']}", "--summary", text,
@@ -325,6 +425,7 @@ def cmd_run(a: argparse.Namespace) -> int:
         print(
             f"{len(findings)} findings · {len(to_verify)} verified · "
             f"{counts['CONFIRMED']} confirmed · {counts['REFUTED']} refuted · {counts['PARTLY']} partly"
+            + (f" · {counts[ERROR]} verifier errors" if counts[ERROR] else "")
         )
         if "handoff" in summary:
             print(f"handoff: {summary['handoff']}")
@@ -360,12 +461,15 @@ def load_audit(ket: Ket, root: str) -> Audit:
     children: dict[str, list[str]] = {}
     for e in g["edges"]:
         children.setdefault(e["parent"], []).append(e["child"])
+    # Stop at any other context node: a chained audit's root derives from
+    # this one, and so does a catbus packet; neither is part of this audit.
     keep, stack = {root}, [root]
     while stack:
         for c in children.get(stack.pop(), []):
-            if c not in keep:
-                keep.add(c)
-                stack.append(c)
+            if c in keep or nodes[c]["kind"] == "context":
+                continue
+            keep.add(c)
+            stack.append(c)
     edges = [e for e in g["edges"] if e["child"] in keep and e["parent"] in keep]
     sub = {cid: nodes[cid] for cid in keep}
     target = json.loads(ket.get(node_output(ket, root)))
@@ -383,15 +487,23 @@ def load_audit(ket: Ket, root: str) -> Audit:
             continue  # verdict nodes have confirms/refutes + grounds, not proposes
         body = json.loads(ket.get(node_output(ket, cid)))
         verdict_edges = [e for e in edges if e["parent"] == cid and e["kind"] in ("confirms", "refutes")]
+        supersedes = [e["parent"] for e in by_child.get(cid, []) if e["kind"] == "supersedes"]
         verdict = None
         evidence = None
         if verdict_edges:
             v = verdict_edges[0]
             verdict = "CONFIRMED" if v["kind"] == "confirms" else "REFUTED"
+            if verdict == "CONFIRMED" and supersedes:
+                verdict = "CORRECTED"  # a PARTLY verdict: confirmed as amended
             for e in edges:
                 if e["child"] == v["child"] and e["kind"] == "grounds":
                     evidence = e["parent"]
-        supersedes = [e["parent"] for e in by_child.get(cid, []) if e["kind"] == "supersedes"]
+        else:
+            # A verification that failed leaves evidence deriving from the
+            # finding and no verdict edge.
+            for e in edges:
+                if e["parent"] == cid and e["kind"] == "derives" and sub[e["child"]]["agent"].startswith("verify:"):
+                    verdict, evidence = ERROR, e["child"]
         a.findings.append(
             {
                 "cid": cid,
@@ -413,6 +525,12 @@ def node_output(ket: Ket, cid: str) -> str:
     return ket.json("dag", "show", cid)["output_cid"]
 
 
+def mermaid_escape(s: str) -> str:
+    """Entity-code escaping for a Mermaid label; `#` first so the codes survive."""
+    table = {"#": "#35;", '"': "#quot;", "<": "#lt;", ">": "#gt;", "|": "#124;", "`": "#96;", "[": "#91;", "]": "#93;"}
+    return "".join(table.get(c, " " if c in "\r\n" else c) for c in s)
+
+
 def render_mermaid(a: Audit) -> str:
     def sid(cid: str) -> str:
         return "n" + cid[:12]
@@ -424,8 +542,8 @@ def render_mermaid(a: Audit) -> str:
     colors = {"memory": "#E8F5E9", "reasoning": "#FFF3E0", "context": "#F1F8E9"}
     out = ["graph BT"]
     for cid, n in sorted(a.nodes.items(), key=lambda kv: (kv[1]["timestamp"], kv[0])):
-        label = n["label"].replace('"', "#quot;")
-        out.append(f'  {sid(cid)}["{cid[:12]}<br/>{n["kind"]} · {n["agent"]}<br/>{label}"]')
+        label, agent = mermaid_escape(n["label"]), mermaid_escape(n["agent"])
+        out.append(f'  {sid(cid)}["{cid[:12]}<br/>{n["kind"]} · {agent}<br/>{label}"]')
         out.append(f"  class {sid(cid)} {n['kind']}")
     for e in a.edges:
         out.append(f"  {sid(e['child'])} {arrows.get(e['kind'], '-->')} {sid(e['parent'])}")
@@ -438,14 +556,19 @@ def render_ledger(ket: Ket, a: Audit) -> str:
     t = a.target
     live = [f for f in a.findings if not f["superseded"]]
     n_conf = sum(1 for f in live if f["verdict"] == "CONFIRMED")
+    n_corr = sum(1 for f in live if f["verdict"] == "CORRECTED")
     n_ref = sum(1 for f in live if f["verdict"] == "REFUTED")
+    n_err = sum(1 for f in live if f["verdict"] == ERROR)
     n_unv = sum(1 for f in live if f["verdict"] is None)
     lines = [
         f"# Audit ledger — {t['repo']} @ `{t['tip'][:12]}`",
         "",
         f"Root `{a.root}` · started {t['started']} · dimensions: {', '.join(t['dimensions'])}",
         "",
-        f"**{len(live)} findings** · {n_conf} confirmed · {n_ref} refuted · {n_unv} unverified"
+        f"**{len(live)} findings** · {n_conf} confirmed"
+        + (f" · {n_corr} corrected" if n_corr else "")
+        + f" · {n_ref} refuted · {n_unv} unverified"
+        + (f" · {n_err} verifier errors" if n_err else "")
         + (f" · {len(a.findings) - len(live)} superseded by corrections" if len(a.findings) != len(live) else ""),
         "",
         "Every row below is a content-addressed node in the audit DAG. A verdict is a",
@@ -461,16 +584,17 @@ def render_ledger(ket: Ket, a: Audit) -> str:
             lines += ["_no findings_", ""]
             continue
         for i, f in enumerate(rows, 1):
-            verdict = f["verdict"] or "unverified"
-            lines.append(f"{i}. **{f['classification']}/{f['severity']}** ({verdict}) — {f['claim']}")
-            lines.append(f"   - evidence: {f['evidence']}")
+            verdict = "VERIFIER ERROR" if f["verdict"] == ERROR else (f["verdict"] or "unverified")
+            lines.append(f"{i}. **{f['classification']}/{f['severity']}** ({verdict}) — {one_line(f['claim'])}")
+            lines.append(f"   - evidence: {one_line(f['evidence'])}")
             if f["supersedes"]:
                 lines.append(f"   - supersedes `{f['supersedes'][:12]}`")
             if f["evidence_cid"]:
                 ev = ket.get(node_output(ket, f["evidence_cid"])).strip().splitlines()
                 shown = "\n".join("     " + l for l in ev[:8])
                 more = f"\n     … ({len(ev) - 8} more lines, `ket get {f['evidence_cid'][:12]}…`)" if len(ev) > 8 else ""
-                lines.append(f"   - verification evidence `{f['evidence_cid'][:12]}`:\n\n{shown}{more}\n")
+                what = "verifier error" if f["verdict"] == ERROR else "verification evidence"
+                lines.append(f"   - {what} `{f['evidence_cid'][:12]}`:\n\n{shown}{more}\n")
             lines.append(f"   - node `{f['cid']}`")
             lines.append("")
     lines += ["## Graph", "", "```mermaid", render_mermaid(a).rstrip(), "```", ""]
