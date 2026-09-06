@@ -5,6 +5,7 @@ when Dolt is present. Needs `ket` (and `catbus` for the handoff test) on PATH.
 """
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SIEVE = [sys.executable, str(HERE.parent / "sieve.py")]
 FAKE = f"{sys.executable} {HERE / 'fake_agent.py'}"
+
+sys.path.insert(0, str(HERE.parent))
+import sieve  # noqa: E402
 
 
 def sh(*cmd, cwd=None, env=None, check=True):
@@ -212,6 +216,42 @@ class SieveEndToEnd(unittest.TestCase):
         block = sh("catbus", "handoff", s["handoff"], env=env).stdout
         self.assertIn("sieve audit of repo@", block)
         self.assertIn(f"- {s['root']}", block, "handoff lists the audit root as its parent")
+
+
+class DefaultAgentTokenization(unittest.TestCase):
+    """D7: DEFAULT_AGENT must survive shlex.split — the value the code hands to
+    subprocess. A tool spec with spaces (e.g. Bash(git branch -v)) may not be
+    shattered, or claude sees a bare -v, prints its version and exits 0, and
+    every reviewer silently 'passes' with no findings."""
+
+    def argv(self):
+        return shlex.split(sieve.DEFAULT_AGENT)
+
+    def _value_after(self, flag):
+        argv = self.argv()
+        self.assertIn(flag, argv, f"{flag} present in DEFAULT_AGENT")
+        return argv[argv.index(flag) + 1]
+
+    def test_allowed_tools_round_trips(self):
+        self.assertEqual(self._value_after("--allowedTools"), sieve.READ_ONLY_TOOLS,
+                         "--allowedTools reconstructs to the intended comma-joined list")
+
+    def test_disallowed_tools_round_trips(self):
+        self.assertEqual(self._value_after("--disallowedTools"), sieve.DENIED_TOOLS,
+                         "--disallowedTools reconstructs to the intended comma-joined list")
+
+    def test_no_tool_spec_is_shattered(self):
+        argv = self.argv()
+        # The classic breakage: Bash(git branch -v) split into pieces so claude
+        # sees a bare version flag. None of these fragments may be an argv element.
+        for fragment in ("-v", "-v)", "branch", "-a", "-r", "Bash(git"):
+            self.assertNotIn(fragment, argv, f"{fragment!r} is a shattered tool spec")
+
+    def test_space_bearing_specs_appear_whole(self):
+        allowed = self._value_after("--allowedTools")
+        specs = allowed.split(",")
+        for spec in ("Bash(git branch -v)", "Bash(git status)", "Bash(git remote -v)"):
+            self.assertIn(spec, specs, f"{spec!r} present whole in the allowed-tools list")
 
 
 if __name__ == "__main__":

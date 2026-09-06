@@ -74,9 +74,14 @@ DENIED_TOOLS = ",".join([
 # user` keeps only the auditor's own settings and `--strict-mcp-config` drops
 # every MCP server the repo could declare. CLAUDE.md still auto-loads; pass
 # `--bare` via --agent to skip that too (it also restricts auth to an API key).
+# Each tool list is one argument to claude, and several specs carry spaces
+# (`Bash(git branch -v)`). The command is re-parsed with `shlex.split` before
+# it runs, so quote each list to keep it whole: unquoted, `shlex.split` shatters
+# `Bash(git branch -v)` and claude sees a bare `-v`, prints its version, and
+# exits 0 — every reviewer then "passes" with no findings.
 DEFAULT_AGENT = (
     "claude -p --output-format json --setting-sources user --strict-mcp-config "
-    f"--allowedTools {READ_ONLY_TOOLS} --disallowedTools {DENIED_TOOLS}"
+    f"--allowedTools {shlex.quote(READ_ONLY_TOOLS)} --disallowedTools {shlex.quote(DENIED_TOOLS)}"
 )
 CID_RE = re.compile(r"[0-9a-f]{64}")
 
