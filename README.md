@@ -2,7 +2,7 @@
 
 **Purpose:** audit a repository into a [ket](https://github.com/nickjoven/ket) DAG. Findings are content-addressed claims. Verification is a typed edge. The ledger is a rendering. Re-auditing is a diff.
 
-sieve generalizes the method behind [crouzeix-audit](https://github.com/nickjoven/crouzeix-audit): fan out independent reviewers by dimension, fan in adversarial verifiers, keep the evidence. The difference is where the result lives. There, the ledger was a hand-maintained Markdown file. Here, every finding, every verdict, and every piece of evidence is a node in a content-addressed graph, and the ledger is generated from it.
+sieve generalizes the method behind crouzeix-audit (a private prior project): fan out independent reviewers by dimension, fan in adversarial verifiers, keep the evidence. The difference is where the result lives. There, the ledger was a hand-maintained Markdown file. Here, every finding, every verdict, and every piece of evidence is a node in a content-addressed graph, and the ledger is generated from it.
 
 ## Quickstart
 
